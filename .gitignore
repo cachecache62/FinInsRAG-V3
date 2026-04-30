@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.log
+
+# Conda
+.conda/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# Data / model / cache
+data/
+models/
+uploads/
+storage/
+*.db
+*.sqlite
+*.pkl
+*.npy
+*.npz
+*.pdf
+*.svg
+
+# OS
+.DS_Store
+Thumbs.db
