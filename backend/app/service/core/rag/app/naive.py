@@ -175,11 +175,11 @@ class Pdf(PdfParser):
         callback(0.63, "Layout analysis ({:.2f}s)".format(timer() - start))
 
         start = timer()
-        self._table_transformer_job(zoomin)
+        self._table_transformer_job(zoomin) # 表格识别$
         callback(0.65, "Table analysis ({:.2f}s)".format(timer() - start))
 
         start = timer()
-        self._text_merge()
+        self._text_merge()  # 合并 OCR输出文本  把分散的文本块组合成更连贯的文本
         callback(0.67, "Text merged ({:.2f}s)".format(timer() - start))
         tbls = self._extract_table_figure(True, zoomin, True, True)
         # self._naive_vertical_merge()
@@ -233,10 +233,13 @@ def chunk(filename, binary=None, from_page=0, to_page=100000,
     parser_config = kwargs.get(
         "parser_config", {
             "chunk_token_num": 128, "delimiter": "\n!?。；！？", "layout_recognize": "DeepDOC"})
+    # 默认把文本切成最多 128 token 的块 用换行和中文/英文常见句末标点做断句分隔 对 PDF 默认使用 DeepDOC 的布局识别模式
     doc = {
         "docnm_kwd": filename,
         "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", filename))
     }
+    # docnm_kwd: 原始文件名 filename     可用于文档名相关检索
+    # title_tks: 把文件名去掉扩展名后，进行分词后的结果   可作为标题词向量/关键词增强
     doc["title_sm_tks"] = rag_tokenizer.fine_grained_tokenize(doc["title_tks"])
     res = []
     pdf_parser = None

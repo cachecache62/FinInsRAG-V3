@@ -68,7 +68,6 @@ class Recognizer(object):
             except Exception:
                 return False
             return False
-
         # https://github.com/microsoft/onnxruntime/issues/9509#issuecomment-951546580
         # Shrink GPU memory after execution
         self.run_options = ort.RunOptions()

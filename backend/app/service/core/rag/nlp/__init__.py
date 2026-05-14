@@ -88,20 +88,23 @@ def naive_merge(sections, chunk_token_num=128, delimiter="\n。；！？"):
         return []
     if isinstance(sections[0], type("")):
         sections = [(s, "") for s in sections]
+    # 初始化存储： $
+    # cks: 存储最终的文本块列表，初始为空字符串  
+    # tk_nums: 存储每个块的token数量，初始为0
     cks = [""]
     tk_nums = [0]
 
     def add_chunk(t, pos):
         nonlocal cks, tk_nums, delimiter
-        tnum = num_tokens_from_string(t)
+        tnum = num_tokens_from_string(t)  # 计算当前文本的token数量 $
         if not pos:
             pos = ""
-        if tnum < 8:
+        if tnum < 8:    # 短文本不保留位置信息 $
             pos = ""
         # Ensure that the length of the merged chunk does not exceed chunk_token_num  
         if tk_nums[-1] > chunk_token_num:
 
-            if t.find(pos) < 0:
+            if t.find(pos) < 0: # 避免重复添加位置信息$
                 t += pos
             cks.append(t)
             tk_nums.append(tnum)

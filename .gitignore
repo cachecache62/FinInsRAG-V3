@@ -71,3 +71,5 @@ backend/bge_model_finetuned/
 node_modules/
 dist/
 build/
+
+TestCode/

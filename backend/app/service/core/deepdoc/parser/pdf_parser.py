@@ -33,6 +33,105 @@ from service.core.rag.nlp import rag_tokenizer
 from copy import deepcopy
 from huggingface_hub import snapshot_download
 
+
+import cv2
+class PDFProcessor:
+    """
+    PDF 处理器,针对扫描件PDF进行预处理，提升OCR识别效果
+    """
+    def __init__(self, images=None):
+        self.images = images if images is not None else []
+
+    def preprocess_scanned_image(self, img):
+        # 如果是 PIL 图片，转 OpenCV 格式
+        if isinstance(img, Image.Image):
+            img = np.array(img)
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        elif isinstance(img, np.ndarray):
+            pass
+        else:
+            logging.warning(f"preprocess_scanned_image: unsupported image type {type(img)}, skipping.")
+            return None
+
+        if not hasattr(img, 'shape'):
+            logging.warning("preprocess_scanned_image: invalid image data, skipping.")
+            return None
+
+        if img.ndim == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        elif img.ndim == 2:
+            gray = img
+        else:
+            logging.warning(f"preprocess_scanned_image: unsupported ndarray ndim {img.ndim}, skipping.")
+            return None
+
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        def to_pil(image):
+            if isinstance(image, np.ndarray):
+                if image.ndim == 2:
+                    return Image.fromarray(image)
+                if image.ndim == 3:
+                    if image.shape[2] == 3:
+                        return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                    if image.shape[2] == 4:
+                        return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGRA2RGB))
+                logging.warning(f"preprocess_scanned_image: unsupported ndarray shape {image.shape}")
+                return None
+            return image
+        logging.info(f"图片的分辨率为: blur_score={blur_score:.2f} 形状为 {img.shape}")
+        if blur_score > 100:
+            logging.debug(f"blur_score的值是 {blur_score}, 图片清晰，无需预处理。")
+            return to_pil(img)
+
+        elif 50 < blur_score <= 100:
+
+            logging.info(f"blur_score的值是 {blur_score}, 图片中度模糊，开始预处理。")
+
+            # 去噪
+            if len(img.shape) == 3:
+                img = cv2.fastNlMeansDenoisingColored(img)
+            else:
+                img = cv2.fastNlMeansDenoising(img)
+
+            # 锐化
+            sharpen_kernel = np.array(
+                [[0, -1, 0],
+                [-1, 5, -1],
+                [0, -1, 0]],
+                dtype=np.float32
+            )
+            img = cv2.filter2D(img, -1, sharpen_kernel)
+
+            # 如果你有超分模型，可以打开这一行
+            # img = sr_model.predict(img)
+
+            # 对比度增强
+            img = cv2.convertScaleAbs(img, alpha=1.5, beta=10)
+
+            return to_pil(img)
+
+        else:
+           logging.warning(f"blur_score的值是 {blur_score}, 图片过于模糊，暂不做额外预处理。")
+           # 直接用MinerU 2.5（它内置了更强的预处理）
+           img = minerU_process(img)
+           return to_pil(img)
+
+    def preprocess_all_images(self):
+        """
+        批量处理 self.images 中的所有图片
+        """
+        processed = []
+        for idx, img in enumerate(self.images):
+            result = self.preprocess_scanned_image(img)
+            if result is None:
+                logging.warning(f"preprocess_all_images: skipped invalid page image {idx}")
+                continue
+            processed.append(result)
+        self.images = processed
+        return self.images
+
+
 class RAGFlowPdfParser:
     def __init__(self):
         self.ocr = OCR()
@@ -192,9 +291,11 @@ class RAGFlowPdfParser:
         MARGIN = 10
         self.tb_cpns = []
         assert len(self.page_layout) == len(self.page_images)
+        # 遍历每一页，找出表格区域$
         for p, tbls in enumerate(self.page_layout):  # for page
+
             tbls = [f for f in tbls if f["type"] == "table"]
-            tbcnt.append(len(tbls))
+            tbcnt.append(len(tbls)) # 记录当前页表格数量$
             if not tbls:
                 continue
             for tb in tbls:  # for table
@@ -210,6 +311,7 @@ class RAGFlowPdfParser:
         assert len(self.page_images) == len(tbcnt) - 1
         if not imgs:
             return
+        # 调用表格识别模型
         recos = self.tbl_det(imgs)
         
 #         recos = [
@@ -466,43 +568,51 @@ class RAGFlowPdfParser:
 
     def _text_merge(self):
         # merge adjusted boxes
-        bxs = self.boxes
+        bxs = self.boxes   # 1 取出当前所有文本框$
 
-        def end_with(b, txt):
+        def end_with(b, txt):  # 2 定义辅助函数：判断是否以某个文本结尾 $
             txt = txt.strip()
             tt = b.get("text", "").strip()
             return tt and tt.find(txt) == len(tt) - len(txt)
 
-        def start_with(b, txts):
+        def start_with(b, txts): # 3 定义辅助函数：判断是否以某个文本开头 $
             tt = b.get("text", "").strip()
             return tt and any([tt.find(t.strip()) == 0 for t in txts])
 
         # horizontally merge adjacent box with the same layout
         i = 0
-        while i < len(bxs) - 1:
+        while i < len(bxs) - 1:  # 4. 开始遍历相邻文本框 $
             b = bxs[i]
             b_ = bxs[i + 1]
+            # 5. 不同版面、不合适类型，不合并 $
             if b.get("layoutno", "0") != b_.get("layoutno", "1") or b.get("layout_type", "") in ["table", "figure",
                                                                                                  "equation"]:
                 i += 1
                 continue
-            if abs(self._y_dis(b, b_)
+            if abs(self._y_dis(b, b_) 
                     # 文本框A: [x0=50, x1=150, top=100, bottom=120, text="人工智能"]
                     # 文本框B: [x0=160, x1=250, top=105, bottom=125, text="技术发展"]
                     # 合并框: [x0=50, x1=250, top=102.5, bottom=122.5, text="人工智能技术发展"]
-                   ) < self.mean_height[bxs[i]["page_number"] - 1] / 3:
+                   ) < self.mean_height[bxs[i]["page_number"] - 1] / 3:  
+                # 6. 判断两个框是不是在同一行 $
+                # 如果Y坐标差异小于平均字符高度的1/3，认为是同行，进行合并 $
                 # merge
-                bxs[i]["x1"] = b_["x1"]
+                bxs[i]["x1"] = b_["x1"]        # 更新右边界$
                 bxs[i]["top"] = (b["top"] + b_["top"]) / 2
-                bxs[i]["bottom"] = (b["bottom"] + b_["bottom"]) / 2
-                bxs[i]["text"] += b_["text"]
-                bxs.pop(i + 1)
+                bxs[i]["bottom"] = (b["bottom"] + b_["bottom"]) / 2   # 更新上下边界$
+                bxs[i]["text"] += b_["text"]   # 拼接文字$
+                bxs.pop(i + 1) # 删除后一个框$
                 continue
-            i += 1
-            continue
+
+            
+            # i += 1
+            # continue
 
             dis_thr = 1
             dis = b["x1"] - b_["x0"]
+            # dis = b_["x1"] - b["x0"]  # 修改$
+
+            # 7. 非正文区域要更谨慎 $
             if b.get("layout_type", "") != "text" or b_.get(
                     "layout_type", "") != "text":
                 if end_with(b, "，") or start_with(b_, "（，"):
@@ -510,7 +620,12 @@ class RAGFlowPdfParser:
                 else:
                     i += 1
                     continue
+            
 
+            # 8. 第二次判断是否合并 $
+            # 两个框 y 方向非常接近
+            # 水平关系满足阈值
+            # 后一个框确实在右边
             if abs(self._y_dis(b, b_)) < self.mean_height[bxs[i]["page_number"] - 1] / 5 \
                     and dis >= dis_thr and b["x1"] < b_["x1"]:
                 # merge
@@ -1119,6 +1234,39 @@ class RAGFlowPdfParser:
         except Exception:
             logging.exception("total_page_number")
 
+    @staticmethod
+    def save_pdf_to_images(page_images, page_from): # $
+        """
+        把pdf文件经过ocr保存成图像，便于可视化提取 $
+        """
+        output_dir = r"D:\studySpace\projectAI\swxy\output\pdf_image_pages"
+        os.makedirs(output_dir, exist_ok=True)
+
+        for idx, img in enumerate(page_images, start=page_from + 1):
+            out_path = os.path.join(output_dir, f"page_{idx}.png")
+            try:
+                if isinstance(img, np.ndarray):
+                    if img.ndim == 2:
+                        img = Image.fromarray(img)
+                    elif img.ndim == 3:
+                        if img.shape[2] == 3:
+                            img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                        elif img.shape[2] == 4:
+                            img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGRA2RGB))
+                        else:
+                            logging.warning(f"skip saving page {idx}: unsupported ndarray channel count {img.shape[2]}")
+                            continue
+                    else:
+                        logging.warning(f"skip saving page {idx}: unsupported ndarray shape {img.shape}")
+                        continue
+                elif not isinstance(img, Image.Image):
+                    logging.warning(f"skip saving page {idx}: unsupported image type {type(img)}")
+                    continue
+                img.save(out_path)
+            except Exception as e:
+                logging.exception(f"save_pdf_to_images failed for page {idx}: type={type(img)} shape={getattr(img, 'shape', None)}")
+                continue
+
     def __images__(self, fnm, zoomin=3, page_from=0,
                    page_to=299, callback=None):
         self.lefted_chars = []
@@ -1130,12 +1278,31 @@ class RAGFlowPdfParser:
         self.page_layout = []
         self.page_from = page_from
         try:
-            self.pdf = pdfplumber.open(fnm) if isinstance(
-                fnm, str) else pdfplumber.open(BytesIO(fnm))
+            if isinstance(fnm, str):
+                with open(fnm, 'rb') as f:
+                    file_bytes = f.read()
+            elif hasattr(fnm, 'read'):
+                file_bytes = fnm.read()
+            else:
+                file_bytes = fnm
+
+            self.pdf = pdfplumber.open(BytesIO(file_bytes))
             self.page_images = [p.to_image(resolution=72 * zoomin).annotated for i, p in
-                                enumerate(self.pdf.pages[page_from:page_to])]
+                                enumerate(self.pdf.pages[page_from:page_to])]  # 将每一页转换成图像$
+            
+            processor = PDFProcessor(self.page_images)
+            processor.images = self.page_images
+
+            self.page_images = processor.preprocess_all_images()
+
+            # 保存图片到本地
+            self.save_pdf_to_images(self.page_images, page_from)  # ocr结果保存到本地
+
+
+
             try:
-                self.page_chars = [[{**c, 'top': c['top'], 'bottom': c['bottom']} for c in page.dedupe_chars().chars if self._has_color(c)] for page in self.pdf.pages[page_from:page_to]]
+                # 尝试提取每一页的字符信息 $
+                self.page_chars = [[{**c, 'top': c['top'], 'bottom': c['bottom']} for c in page.dedupe_chars().chars if self._has_color(c)] for page in self.pdf.pages[page_from:page_to]] 
             except Exception as e:
                 logging.warning(f"Failed to extract characters for pages {page_from}-{page_to}: {str(e)}")
                 self.page_chars = [[] for _ in range(page_to - page_from)]  # If failed to extract, using empty list instead.
@@ -1143,6 +1310,12 @@ class RAGFlowPdfParser:
             self.total_page = len(self.pdf.pages)
         except Exception:
             logging.exception("RAGFlowPdfParser __images__")
+        finally:
+            try:
+                if hasattr(self, 'pdf') and self.pdf is not None:
+                    self.pdf.close()
+            except Exception:
+                pass
 
         self.outlines = []   # 目录/书签 $$
         try:

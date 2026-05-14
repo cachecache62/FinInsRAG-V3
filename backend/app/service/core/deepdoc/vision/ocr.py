@@ -71,6 +71,7 @@ def load_model(model_dir, nm):
         raise ValueError("not find model file path {}".format(
             model_file_path))
 
+    
     def cuda_is_available():
         try:
             import torch
@@ -79,7 +80,6 @@ def load_model(model_dir, nm):
         except Exception:
             return False
         return False
-
     options = ort.SessionOptions()
     options.enable_cpu_mem_arena = False
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -95,14 +95,30 @@ def load_model(model_dir, nm):
             "gpu_mem_limit": 512 * 1024 * 1024, # Limit gpu memory
             "arena_extend_strategy": "kNextPowerOfTwo",  # gpu memory allocation strategy
         }
-        sess = ort.InferenceSession(
-            model_file_path,
-            options=options,
-            providers=['CUDAExecutionProvider'],
-            provider_options=[cuda_provider_options]
+        # sess = ort.InferenceSession(
+        #     model_file_path,
+        #     options=options,
+        #     providers=['CUDAExecutionProvider'],
+        #     provider_options=[cuda_provider_options]
+        #     )
+        # run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
+        # logging.info(f"TextRecognizer {nm} uses GPU")
+
+        # 优化版本 防止onnxruntime-gpu不匹配报错
+        try:
+            sess = ort.InferenceSession(
+                model_file_path,
+                options=options,
+                providers=['CUDAExecutionProvider'],
+                provider_options=[cuda_provider_options]
             )
-        run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
-        logging.info(f"TextRecognizer {nm} uses GPU")
+            run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
+            logging.info(f"TextRecognizer {nm} uses GPU")
+        except Exception as e:
+            logging.warning("GPU 加载失败，fallback CPU: %s", e)
+            sess = ort.InferenceSession(model_file_path, providers=['CPUExecutionProvider'])
+            run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu")
+
     else:
         sess = ort.InferenceSession(
             model_file_path,
